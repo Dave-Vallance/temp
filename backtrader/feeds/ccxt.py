@@ -24,10 +24,10 @@ from __future__ import (absolute_import, division, print_function,
 
 from collections import deque
 from datetime import datetime
-
 import backtrader as bt
 from backtrader.feed import DataBase
 from backtrader.stores.ccxtstore import CCXTStore
+import time
 
 class CCXT(DataBase):
     """
@@ -52,6 +52,7 @@ class CCXT(DataBase):
     params = (
         ('historical', False),  # only historical download
         ('backfill_start', False),  # do backfilling at the start
+        ('fetch_ohlcv_params', {})
     )
 
     # States for the Finite State Machine in _load
@@ -121,16 +122,22 @@ class CCXT(DataBase):
 
         while True:
             dlen = len(self._data)
+
             for ohlcv in sorted(self.store.fetch_ohlcv(self.symbol, timeframe=granularity,
-                                                       since=since, limit=limit)):
+                                                       since=since, limit=limit, params=self.p.fetch_ohlcv_params)):
+
                 if None in ohlcv:
                     continue
 
                 tstamp = ohlcv[0]
+
+                # Prevent from loading incomplete data
+                if tstamp > (time.time() * 1000):
+                    continue
+
                 if tstamp > self._last_ts:
                     self._data.append(ohlcv)
                     self._last_ts = tstamp
-                    since = tstamp + 1
 
             if dlen == len(self._data):
                 break
