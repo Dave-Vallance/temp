@@ -20,7 +20,8 @@
 ###############################################################################
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
-
+import collections
+from backtrader.position import Position
 from backtrader import BrokerBase, OrderBase, Order
 from backtrader.utils.py3 import queue
 from backtrader.stores.ccxtstore import CCXTStore
@@ -54,7 +55,14 @@ class CCXTBroker(BrokerBase):
 
         self.currency = currency
 
+        self.positions = collections.defaultdict(Position)
+
         self.notifs = queue.Queue()  # holds orders which are notified
+
+        self.open_orders = list()
+
+        self.startingcash = self.store.getcash(currency)
+        self.startingvalue = self.store.getvalue(currency)
 
     def getcash(self):
         return self.store.getcash(self.currency)
@@ -71,15 +79,37 @@ class CCXTBroker(BrokerBase):
     def notify(self, order):
         self.notifs.put(order)
 
-    def getposition(self, data):
-        currency = data.symbol.split('/')[0]
-        return self.store.getposition(currency)
+    def getposition(self, data, clone=True):
+        # return self.o.getposition(data._dataname, clone=clone)
+        pos = self.positions[data._dataname]
+        if clone:
+            pos = pos.clone()
+
+        return pos
+
+    def next(self):
+        for o_order in list(self.open_orders):
+            oID = o_order.ccxt_order['id']
+            ccxt_order = self.store.fetch_order(oID)
+            if ccxt_order['status'] == 'closed':
+                pos = self.getposition(o_order.data, clone=False)
+                pos.update(o_order.size, o_order.price)
+                o_order.completed()
+                self.notify(o_order)
+                self.open_orders.remove(o_order)
 
     def _submit(self, owner, data, exectype, side, amount, price, params):
-        order_type = self.order_types.get(exectype)
+        order_type = self.order_types.get(exectype) if exectype else 'market'
+        # Extract CCXT specific params if passed to the order
+        params = params['params'] if 'params' in params else params
         _order = self.store.create_order(symbol=data.symbol, order_type=order_type, side=side,
                                          amount=amount, price=price, params=params)
+
         order = CCXTOrder(owner, data, _order)
+        self.open_orders.append(order)
+        #pos = self.getposition(data, clone=False)
+        #pos.update(order.size, order.price)
+
         self.notify(order)
         return order
 
@@ -96,7 +126,19 @@ class CCXTBroker(BrokerBase):
         return self._submit(owner, data, exectype, 'sell', size, price, kwargs)
 
     def cancel(self, order):
-        return self.store.cancel_order(order['id'])
+        oID = order.ccxt_order['id']
+        # check first if the order has already been filled otherwise an error
+        # might be raised if we try to cancel an order that is not open.
+        ccxt_order = self.store.fetch_order(oID)
+        if ccxt_order['status'] == 'closed':
+            return order
+
+        ccxt_order = self.store.cancel_order(oID)
+        if ccxt_order['status'] == 'canceled':
+            self.open_orders.remove(order)
+            order.cancel()
+            self.notify(order)
+        return order
 
     def get_orders_open(self, safe=False):
         return self.store.fetch_open_orders()
